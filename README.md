@@ -2,6 +2,10 @@
 
 ![logo](https://github.com/Druidblack/Jellyfin.Plugin.ArtworkMultiSource/blob/main/images/logot.jpg)
 
+```
+https://raw.githubusercontent.com/Druidblack/Jellyfin.Plugin.ArtworkMultiSource/main/manifest.json
+```
+
 A plugin that receives images of posters and logos from themoviedb and tvdb sites and sorts them together.
 
 The first images are in the language of the library, then in English.
