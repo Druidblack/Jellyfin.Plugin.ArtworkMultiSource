@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <meta charset="utf-8" />
+    <title>Artwork Multi Source Provider</title>
+</head>
+<body>
+    <div id="MultiSourceArtworkProviderConfigurationPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+
+                <h1>Artwork Multi Source Provider</h1>
+                <div class="fieldDescription">Loading images from <b>TVDB</b> and <b>TMDb</b>.</div>
+
+                <form id="MultiSourceArtworkProviderConfigurationForm">
+
+                    <h2>TMDb</h2>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
+                            <input id="enableTmdbImages" name="enableTmdbImages" type="checkbox" is="emby-checkbox" />
+                            <span>Enable TMDb images</span>
+                        </label>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="tmdbApiKey">TMDb API Key</label>
+                        <input id="tmdbApiKey" name="tmdbApiKey" type="text" is="emby-input" autocomplete="off" />
+                        <div class="fieldDescription">Used for TV and Movie images</div>
+                    </div>
+
+                    <h2>Ordering</h2>
+
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
+                            <input id="sortImagesByResolutionDesc" name="sortImagesByResolutionDesc" type="checkbox" is="emby-checkbox" />
+                            <span>Sort images by resolution (largest first)</span>
+                        </label>
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+
+                </form>
+            </div>
+        </div>
+
+        <script type="text/javascript">
+            var MultiSourceArtworkProviderConfigurationPage = {
+                pluginUniqueId: "6215a9ee-6574-44cd-a5c5-4604b3709a76",
+
+                loadConfiguration: function () {
+                    Dashboard.showLoadingMsg();
+
+                    ApiClient.getPluginConfiguration(MultiSourceArtworkProviderConfigurationPage.pluginUniqueId).then(function (config) {
+                        document.getElementById('enableTmdbImages').checked = config.EnableTmdbImages !== false;
+                        document.getElementById('tmdbApiKey').value = config.TmdbApiKey || '';
+
+                        document.getElementById('sortImagesByResolutionDesc').checked = config.SortImagesByResolutionDesc === true;
+
+                        Dashboard.hideLoadingMsg();
+                    }).catch(function (err) {
+                        console.error('MSAP getPluginConfiguration failed', err);
+                        Dashboard.hideLoadingMsg();
+                    });
+                },
+
+                saveConfiguration: function () {
+                    Dashboard.showLoadingMsg();
+
+                    ApiClient.getPluginConfiguration(MultiSourceArtworkProviderConfigurationPage.pluginUniqueId).then(function (config) {
+                        config.EnableTmdbImages = document.getElementById('enableTmdbImages').checked;
+                        config.TmdbApiKey = document.getElementById('tmdbApiKey').value || '';
+
+                        config.SortImagesByResolutionDesc = document.getElementById('sortImagesByResolutionDesc').checked;
+
+                        ApiClient.updatePluginConfiguration(MultiSourceArtworkProviderConfigurationPage.pluginUniqueId, config).then(function (result) {
+                            Dashboard.processPluginConfigurationUpdateResult(result);
+                        }).catch(function (err) {
+                            console.error('MSAP updatePluginConfiguration failed', err);
+                            Dashboard.hideLoadingMsg();
+                        });
+                    }).catch(function (err) {
+                        console.error('MSAP getPluginConfiguration (save) failed', err);
+                        Dashboard.hideLoadingMsg();
+                    });
+                }
+            };
+
+            document.getElementById('MultiSourceArtworkProviderConfigurationPage').addEventListener('pageshow', function () {
+                MultiSourceArtworkProviderConfigurationPage.loadConfiguration();
+            });
+
+            document.getElementById('MultiSourceArtworkProviderConfigurationForm').addEventListener('submit', function (e) {
+                e.preventDefault();
+                MultiSourceArtworkProviderConfigurationPage.saveConfiguration();
+            });
+        </script>
+    </div>
+</body>
+</html>
