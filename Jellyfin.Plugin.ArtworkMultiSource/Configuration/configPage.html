@@ -8,11 +8,16 @@
     <div id="MultiSourceArtworkProviderConfigurationPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox">
         <div data-role="content">
             <div class="content-primary">
-
                 <h1>Artwork Multi Source Provider</h1>
-                <div class="fieldDescription">Loading images from <b>TVDB</b> and <b>TMDb</b>.</div>
+                <div class="fieldDescription">Loads and combines artwork from <b>TVDB</b> and <b>TMDb</b>.</div>
 
                 <form id="MultiSourceArtworkProviderConfigurationForm">
+                    <h2>TVDB</h2>
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="tvdbSubscriberPin">TVDB Subscriber PIN (optional)</label>
+                        <input id="tvdbSubscriberPin" name="tvdbSubscriberPin" type="password" is="emby-input" autocomplete="new-password" />
+                        <div class="fieldDescription">Only needed for TVDB accounts/endpoints that require a subscriber PIN. The Jellyfin TVDB project key is built into the plugin.</div>
+                    </div>
 
                     <h2>TMDb</h2>
                     <div class="checkboxContainer checkboxContainer-withDescription">
@@ -24,11 +29,34 @@
 
                     <div class="inputContainer">
                         <label class="inputLabel inputLabelUnfocused" for="tmdbApiKey">TMDb API Key</label>
-                        <input id="tmdbApiKey" name="tmdbApiKey" type="text" is="emby-input" autocomplete="off" />
-                        <div class="fieldDescription">Used for TV and Movie images</div>
+                        <input id="tmdbApiKey" name="tmdbApiKey" type="password" is="emby-input" autocomplete="new-password" />
+                        <div class="fieldDescription">Used for TV and movie image lookups and provider-ID resolution.</div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="tmdbImageLanguages">TMDb image languages (optional)</label>
+                        <input id="tmdbImageLanguages" name="tmdbImageLanguages" type="text" is="emby-input" autocomplete="off" placeholder="ru,en,null" />
+                        <div class="fieldDescription">Comma-separated ISO 639-1 codes. Use <b>null</b> for images without a language. Leave blank to request all languages.</div>
                     </div>
 
                     <h2>Ordering</h2>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
+                            <input id="sortImagesByLanguagePriority" name="sortImagesByLanguagePriority" type="checkbox" is="emby-checkbox" />
+                            <span>Sort images by language priority</span>
+                        </label>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="languagePriority1">Language priority 1</label>
+                        <input id="languagePriority1" name="languagePriority1" type="text" is="emby-input" autocomplete="off" placeholder="ru" />
+                        <div class="fieldDescription">ISO 639-1 language code. Use <b>00</b> or <b>null</b> for images without language/text.</div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="languagePriority2">Language priority 2</label>
+                        <input id="languagePriority2" name="languagePriority2" type="text" is="emby-input" autocomplete="off" placeholder="en" />
+                    </div>
 
                     <div class="checkboxContainer checkboxContainer-withDescription">
                         <label>
@@ -37,12 +65,20 @@
                         </label>
                     </div>
 
+                    <h2>Scheduled refresh</h2>
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
+                            <input id="replaceAllImagesOnScheduledRefresh" name="replaceAllImagesOnScheduledRefresh" type="checkbox" is="emby-checkbox" />
+                            <span>Allow scheduled task to replace all existing images</span>
+                        </label>
+                        <div class="fieldDescription">Disabled by default. Enable only if the scheduled task should replace manually selected/local artwork as well.</div>
+                    </div>
+
                     <div>
                         <button is="emby-button" type="submit" class="raised button-submit block emby-button">
                             <span>Save</span>
                         </button>
                     </div>
-
                 </form>
             </div>
         </div>
@@ -55,10 +91,16 @@
                     Dashboard.showLoadingMsg();
 
                     ApiClient.getPluginConfiguration(MultiSourceArtworkProviderConfigurationPage.pluginUniqueId).then(function (config) {
+                        document.getElementById('tvdbSubscriberPin').value = config.TvdbSubscriberPin || '';
                         document.getElementById('enableTmdbImages').checked = config.EnableTmdbImages !== false;
                         document.getElementById('tmdbApiKey').value = config.TmdbApiKey || '';
+                        document.getElementById('tmdbImageLanguages').value = config.TmdbImageLanguages || '';
 
+                        document.getElementById('sortImagesByLanguagePriority').checked = config.SortImagesByLanguagePriority === true;
+                        document.getElementById('languagePriority1').value = config.LanguagePriority1 || 'ru';
+                        document.getElementById('languagePriority2').value = config.LanguagePriority2 || 'en';
                         document.getElementById('sortImagesByResolutionDesc').checked = config.SortImagesByResolutionDesc === true;
+                        document.getElementById('replaceAllImagesOnScheduledRefresh').checked = config.ReplaceAllImagesOnScheduledRefresh === true;
 
                         Dashboard.hideLoadingMsg();
                     }).catch(function (err) {
@@ -71,10 +113,16 @@
                     Dashboard.showLoadingMsg();
 
                     ApiClient.getPluginConfiguration(MultiSourceArtworkProviderConfigurationPage.pluginUniqueId).then(function (config) {
+                        config.TvdbSubscriberPin = document.getElementById('tvdbSubscriberPin').value || '';
                         config.EnableTmdbImages = document.getElementById('enableTmdbImages').checked;
                         config.TmdbApiKey = document.getElementById('tmdbApiKey').value || '';
+                        config.TmdbImageLanguages = document.getElementById('tmdbImageLanguages').value || '';
 
+                        config.SortImagesByLanguagePriority = document.getElementById('sortImagesByLanguagePriority').checked;
+                        config.LanguagePriority1 = document.getElementById('languagePriority1').value || '';
+                        config.LanguagePriority2 = document.getElementById('languagePriority2').value || '';
                         config.SortImagesByResolutionDesc = document.getElementById('sortImagesByResolutionDesc').checked;
+                        config.ReplaceAllImagesOnScheduledRefresh = document.getElementById('replaceAllImagesOnScheduledRefresh').checked;
 
                         ApiClient.updatePluginConfiguration(MultiSourceArtworkProviderConfigurationPage.pluginUniqueId, config).then(function (result) {
                             Dashboard.processPluginConfigurationUpdateResult(result);

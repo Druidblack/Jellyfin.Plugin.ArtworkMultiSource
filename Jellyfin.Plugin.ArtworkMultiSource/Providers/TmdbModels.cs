@@ -18,7 +18,6 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
         public List<TmdbImage> Logos { get; set; } = new();
     }
 
-    
     public sealed class TmdbMovieImagesResponse
     {
         [JsonPropertyName("id")]
@@ -34,7 +33,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
         public List<TmdbImage> Logos { get; set; } = new();
     }
 
-public sealed class TmdbSeasonImagesResponse
+    public sealed class TmdbSeasonImagesResponse
     {
         [JsonPropertyName("id")]
         public int Id { get; set; }
@@ -82,7 +81,6 @@ public sealed class TmdbSeasonImagesResponse
         public int Id { get; set; }
     }
 
-
     public sealed class TmdbFindMovieResult
     {
         [JsonPropertyName("id")]
@@ -100,17 +98,4 @@ public sealed class TmdbSeasonImagesResponse
         [JsonPropertyName("tvdb_id")]
         public int? TvdbId { get; set; }
     }
-
-    public sealed class TmdbMovieExternalIds
-    {
-        [JsonPropertyName("id")]
-        public int Id { get; set; }
-
-        [JsonPropertyName("imdb_id")]
-        public string? ImdbId { get; set; }
-
-        [JsonPropertyName("tvdb_id")]
-        public int? TvdbId { get; set; }
-    }
-
 }

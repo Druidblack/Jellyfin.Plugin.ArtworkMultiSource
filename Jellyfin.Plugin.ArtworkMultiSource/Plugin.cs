@@ -11,7 +11,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource
     public class Plugin : BasePlugin<Configuration.PluginConfiguration>, IHasWebPages
     {
         public override string Name => Constants.PluginDisplayName;
-        public override string Description => "Artwor Multi Source provider (TVDB + TMDb)";
+        public override string Description => "Artwork Multi Source provider (TVDB + TMDb)";
         public override Guid Id => Guid.Parse(Constants.PluginGuid);
 
         public Plugin(

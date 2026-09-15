@@ -22,7 +22,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
     /// <summary>
     /// Remote image provider that aggregates artwork from TVDB and TMDb.
     /// </summary>
-    public class MultiSourceImageProvider : IRemoteImageProvider
+    public class MultiSourceImageProvider : IRemoteImageProvider, IDisposable
     {
         private readonly ILogger<MultiSourceImageProvider> _logger;
         private readonly TvdbApiClient _tvdbClient;
@@ -43,11 +43,10 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
         private readonly ConcurrentDictionary<string, (int Width, int Height)> _sizeCache = new(StringComparer.OrdinalIgnoreCase);
 
         // Backdrops are intentionally constrained to a reasonable default to avoid overwhelming the image picker UI.
-        // (These options were configurable in newer versions; in v1.0.7.2 we keep the simple fixed defaults.)
         private const int FixedMaxBackdrops = 5;
         private const int FixedBackdropMinWidth = 1920;
         private const int FixedBackdropMinHeight = 1080;
-        private const double FixedBackdropMinAspectRatio = 1.78;
+        private const double FixedBackdropMinAspectRatio = (16.0 / 9.0) - 0.01;
 
         public MultiSourceImageProvider(ILogger<MultiSourceImageProvider> logger)
         {
@@ -64,7 +63,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Timeout = TimeSpan.FromSeconds(30)
             };
             _httpClient.DefaultRequestHeaders.UserAgent.Clear();
-            _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"{Constants.PluginName}/1.0");
+            _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"{Constants.PluginName}/{Constants.PluginVersion}");
 
             _tvdbClient = new TvdbApiClient(_httpClient, _logger, Constants.TvdbProjectApiKey);
             _tmdbClient = new TmdbApiClient(_httpClient, _logger, _config.TmdbApiKey ?? string.Empty);
@@ -75,17 +74,17 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
 
         public string Name => $"{Constants.PluginDisplayName} (TVDB+TMDb)";
 
-        public Task<HttpResponseMessage> GetImageResponse(string url, CancellationToken cancellationToken)
+        public async Task<HttpResponseMessage> GetImageResponse(string url, CancellationToken cancellationToken)
         {
             // Images are served from public CDNs (TVDB / TMDb). Jellyfin expects the provider
             // to return a streamed HTTP response for the selected remote image.
-            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.Accept.Clear();
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/avif"));
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/webp"));
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*"));
-            return _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            return await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         }
 
         public bool Supports(BaseItem item)
@@ -293,6 +292,9 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             return await ApplyResolutionOrderingIfEnabledAsync(list, cancellationToken).ConfigureAwait(false);
         }
 
+        private bool SuppressSourceRatings
+            => _config.SortImagesByResolutionDesc || (_sortByLanguagePriority && _languagePriorityOrder.Length > 0);
+
         private bool EnsureTmdbClientConfigured()
         {
             var key = _config.TmdbApiKey ?? string.Empty;
@@ -308,6 +310,9 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
         private void RefreshConfigDerivedFields()
         {
             _config = Plugin.GetConfigurationSafe(_logger);
+
+            // Apply credentials changed in the UI without requiring a server restart.
+            _tvdbClient.UpdateSubscriberPin(_config.TvdbSubscriberPin);
 
             // Rebuild TMDb client if the key/token was changed in the UI.
             EnsureTmdbClientConfigured();
@@ -352,6 +357,18 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
 
         private static string? GetImdbId(BaseItem item)
         {
+            // Seasons usually inherit provider IDs from the parent series. This matters when
+            // IMDb is the only available pivot: TMDb can resolve the series from IMDb, and
+            // TVDB can then be resolved from the TMDb TV external IDs.
+            if (item is Season season && season.Series != null)
+            {
+                var seriesId = season.Series.GetProviderId(MetadataProvider.Imdb);
+                if (!string.IsNullOrWhiteSpace(seriesId))
+                {
+                    return seriesId;
+                }
+            }
+
             var id = item.GetProviderId(MetadataProvider.Imdb);
             return string.IsNullOrWhiteSpace(id) ? null : id;
         }
@@ -389,29 +406,11 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 tmdbMovieId = parsedTmdb;
             }
 
-            // Resolve TMDb id if missing
-            if (_config.EnableTmdbImages && EnsureTmdbClientConfigured() && !tmdbMovieId.HasValue)
+            // TMDb supports IMDb -> Movie lookup, but its API does not support TVDB IDs for movies.
+            // Therefore TVDB and TMDb movie IDs are handled independently unless IMDb can resolve TMDb.
+            if (_config.EnableTmdbImages && EnsureTmdbClientConfigured() && !tmdbMovieId.HasValue && !string.IsNullOrWhiteSpace(imdbId))
             {
-                if (tvdbMovieId.HasValue)
-                {
-                    tmdbMovieId = await _tmdbClient.FindMovieIdByTvdbAsync(tvdbMovieId.Value, cancellationToken).ConfigureAwait(false);
-                }
-
-                if (!tmdbMovieId.HasValue && !string.IsNullOrWhiteSpace(imdbId))
-                {
-                    tmdbMovieId = await _tmdbClient.FindMovieIdByImdbAsync(imdbId!, cancellationToken).ConfigureAwait(false);
-                }
-            }
-
-            // Resolve TVDB movie id if missing (when the library only has TMDb ids).
-            if (!tvdbMovieId.HasValue && _config.EnableTmdbImages && EnsureTmdbClientConfigured() && tmdbMovieId.HasValue)
-            {
-                var resolvedTvdb = await _tmdbClient.GetTvdbIdForMovieAsync(tmdbMovieId.Value, cancellationToken).ConfigureAwait(false);
-                if (resolvedTvdb.HasValue)
-                {
-                    tvdbMovieId = resolvedTvdb.Value;
-                    _logger.LogDebug("Resolved TVDB movie id {TvdbId} from TMDb movie id {TmdbId} for {Name}", tvdbMovieId.Value, tmdbMovieId.Value, item.Name);
-                }
+                tmdbMovieId = await _tmdbClient.FindMovieIdByImdbAsync(imdbId!, cancellationToken).ConfigureAwait(false);
             }
 
             // TVDB movie images
@@ -420,7 +419,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             {
                 tvdbMovie = await _tvdbClient.GetMovieExtendedAsync(tvdbMovieId.Value, cancellationToken).ConfigureAwait(false);
 
-                images.AddRange(GetTvdbMovieImages(tvdbMovieId.Value, tvdbMovie));
+                images.AddRange(GetTvdbMovieImages(tvdbMovie));
                 // Movies: do not fetch/return remote backdrops.
             }
 
@@ -486,22 +485,6 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             }
 
             return v;
-        }
-
-        private static bool IsNoLanguage(string? language)
-            => string.Equals(NormalizeLanguage(language), "00", StringComparison.OrdinalIgnoreCase);
-
-        private bool IsLanguageMatch(string? imageLanguage, string? desiredLanguage)
-        {
-            var img = NormalizeLanguage(imageLanguage);
-            var desired = NormalizeLanguage(desiredLanguage);
-
-            if (desired == "00")
-            {
-                return img == "00";
-            }
-
-            return string.Equals(img, desired, StringComparison.OrdinalIgnoreCase);
         }
 
         private int GetLanguageRank(RemoteImageInfo image)
@@ -591,8 +574,9 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 return null;
             }
 
-            // TVDB score is usually 0..100
-            return score.Value / 10.0;
+            // TVDB documents score only as a relative sorting hint, not a stable public scale.
+            // Preserve the legacy monotonic mapping but keep the value inside Jellyfin's 0..10 range.
+            return Math.Round(Math.Clamp(score.Value / 10.0, 0.0, 10.0), 2);
         }
 
         private static string? GetTvdbArtworkUrl(TvdbArtwork artwork)
@@ -637,7 +621,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Height = a.Height,
                 // IMPORTANT: Do not set image ratings. Jellyfin may use them for its own ordering,
                 // which would override our language/resolution sorting.
-                CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
             }));
 
             list.AddRange(series.Artworks.Where(a => a.Type == 1 && GetTvdbArtworkUrl(a) != null).Select(a => new RemoteImageInfo
@@ -648,7 +632,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Language = NormalizeLanguage(a.Language),
                 Width = a.Width,
                 Height = a.Height,
-                CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
             }));
 
             list.AddRange(series.Artworks.Where(a => (a.Type == 23 || a.Type == 5 || a.Type == 8) && GetTvdbArtworkUrl(a) != null).Select(a => new RemoteImageInfo
@@ -659,7 +643,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Language = NormalizeLanguage(a.Language),
                 Width = a.Width,
                 Height = a.Height,
-                CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
             }));
 
             list.AddRange(series.Artworks.Where(a => (a.Type == 22 || a.Type == 9) && GetTvdbArtworkUrl(a) != null).Select(a => new RemoteImageInfo
@@ -670,7 +654,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Language = NormalizeLanguage(a.Language),
                 Width = a.Width,
                 Height = a.Height,
-                CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
             }));
 
             list.AddRange(series.Artworks.Where(a => a.Type == 13 && GetTvdbArtworkUrl(a) != null).Select(a => new RemoteImageInfo
@@ -681,7 +665,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Language = NormalizeLanguage(a.Language),
                 Width = a.Width,
                 Height = a.Height,
-                CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
             }));
 
             return list;
@@ -711,14 +695,14 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                     Language = NormalizeLanguage(a.Language),
                     Width = a.Width,
                     Height = a.Height,
-                    CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                    CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
                 });
             }
 
             return list;
         }
 
-        private List<RemoteImageInfo> GetTvdbMovieImages(int movieId, TvdbMovieExtended? movie)
+        private List<RemoteImageInfo> GetTvdbMovieImages(TvdbMovieExtended? movie)
         {
             if (movie?.Artworks == null)
             {
@@ -736,7 +720,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Language = NormalizeLanguage(a.Language),
                 Width = a.Width,
                 Height = a.Height,
-                CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
             }));
 
             // banners
@@ -748,7 +732,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Language = NormalizeLanguage(a.Language),
                 Width = a.Width,
                 Height = a.Height,
-                CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
             }));
 
             // logos
@@ -760,7 +744,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Language = NormalizeLanguage(a.Language),
                 Width = a.Width,
                 Height = a.Height,
-                CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
             }));
 
             // art
@@ -772,33 +756,10 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Language = NormalizeLanguage(a.Language),
                 Width = a.Width,
                 Height = a.Height,
-                CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
             }));
 
             return list;
-        }
-
-        private List<RemoteImageInfo> GetTvdbMovieBackdrops(int movieId, TvdbMovieExtended? movie)
-        {
-            if (movie?.Artworks == null)
-            {
-                return new List<RemoteImageInfo>();
-            }
-
-            return movie.Artworks
-                .Where(a => IsBackdropType(a))
-                .Where(a => GetTvdbArtworkUrl(a) != null)
-                .Select(a => new RemoteImageInfo
-                {
-                    ProviderName = Name,
-                    Url = GetTvdbArtworkUrl(a)!,
-                    Type = ImageType.Backdrop,
-                    Language = NormalizeLanguage(a.Language),
-                    Width = a.Width,
-                    Height = a.Height,
-                    CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
-                })
-                .ToList();
         }
 
         private async Task<IEnumerable<RemoteImageInfo>> GetTvdbSeasonImagesAsync(string tvdbId, int seasonNumber, string displayOrder, CancellationToken cancellationToken, TvdbSeriesExtended? series = null)
@@ -845,7 +806,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Language = NormalizeLanguage(a.Language),
                 Width = a.Width,
                 Height = a.Height,
-                CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
             }));
 
             list.AddRange(banners.Where(a => GetTvdbArtworkUrl(a) != null).Select(a => new RemoteImageInfo
@@ -856,7 +817,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 Language = NormalizeLanguage(a.Language),
                 Width = a.Width,
                 Height = a.Height,
-                CommunityRating = _config.SortImagesByResolutionDesc ? null : ToRating(a.Score)
+                CommunityRating = SuppressSourceRatings ? null : ToRating(a.Score)
             }));
 
             // If no poster found, use season.Image from seasons list as a last resort
@@ -900,8 +861,8 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                     Language = NormalizeLanguage(img.Language),
                     Width = img.Width,
                     Height = img.Height,
-                    // If resolution sorting is enabled, suppress ratings so Jellyfin does not re-order the list.
-                    CommunityRating = _config.SortImagesByResolutionDesc ? null : ToTmdbRating(img.VoteAverage)
+                    // Suppress ratings whenever custom ordering is enabled so Jellyfin does not re-order the list.
+                    CommunityRating = SuppressSourceRatings ? null : ToTmdbRating(img.VoteAverage)
                 });
             }
 
@@ -915,14 +876,8 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 return null;
             }
 
-            // TMDb image votes are commonly in a 0-5 range; normalize to 0-10 for Jellyfin.
-            var v = voteAverage.Value;
-            if (v <= 5.0)
-            {
-                v *= 2.0;
-            }
-
-            return Math.Round(Math.Min(10.0, Math.Max(0.0, v)), 2);
+            // TMDb image vote_average is already expressed on a 0..10 scale.
+            return Math.Round(Math.Clamp(voteAverage.Value, 0.0, 10.0), 2);
         }
 
         private static bool PassBackdropQuality(RemoteImageInfo img)
@@ -1123,6 +1078,13 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             await Task.WhenAll(tasks).ConfigureAwait(false);
         }
 
+        public void Dispose()
+        {
+            _tvdbClient.Dispose();
+            _httpClient.Dispose();
+            GC.SuppressFinalize(this);
+        }
+
         private async Task<(int Width, int Height)?> TryGetImageSizeAsync(string url, CancellationToken cancellationToken)
         {
             if (!_config.SortImagesByResolutionDesc) return null;
@@ -1149,10 +1111,21 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 }
 
                 // IMPORTANT: do not read the full image body. Some CDNs ignore Range and would send MBs.
-                // We only need the first chunk to parse headers.
+                // We only need the first 64 KiB window to parse common image headers.
                 await using var stream = await res.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
                 var buffer = new byte[65536];
-                var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
+                var read = 0;
+                while (read < buffer.Length)
+                {
+                    var chunk = await stream.ReadAsync(buffer.AsMemory(read, buffer.Length - read), cancellationToken).ConfigureAwait(false);
+                    if (chunk == 0)
+                    {
+                        break;
+                    }
+
+                    read += chunk;
+                }
+
                 if (read <= 0)
                 {
                     return null;
@@ -1162,6 +1135,12 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                 var size = ImageHeaderParser.TryParseImageSize(header);
                 if (size.HasValue)
                 {
+                    // Keep the long-lived provider cache bounded for large libraries.
+                    if (_sizeCache.Count >= 5000)
+                    {
+                        _sizeCache.Clear();
+                    }
+
                     _sizeCache[url] = size.Value;
                 }
 

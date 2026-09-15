@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
@@ -22,8 +21,6 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.ScheduledTasks;
 /// </summary>
 public sealed class RefreshArtworkTask : IScheduledTask
 {
-    private const int PageSize = 200;
-
     private readonly ILibraryManager _libraryManager;
     private readonly IFileSystem _fileSystem;
     private readonly ILogger<RefreshArtworkTask> _logger;
@@ -63,11 +60,12 @@ public sealed class RefreshArtworkTask : IScheduledTask
         // ImageRefreshMode is set to FullRefresh to force providers to run and to look for new images.
         // MetadataRefreshOptions expects an IDirectoryService instance (not IFileSystem).
         // DirectoryService is the standard Jellyfin implementation backed by IFileSystem.
+        var pluginConfig = Plugin.GetConfigurationSafe(_logger);
         var refreshOptions = new MetadataRefreshOptions(new DirectoryService(_fileSystem))
         {
             MetadataRefreshMode = MetadataRefreshMode.Default,
             ImageRefreshMode = MetadataRefreshMode.FullRefresh,
-            ReplaceAllImages = true,
+            ReplaceAllImages = pluginConfig.ReplaceAllImagesOnScheduledRefresh,
             EnableRemoteContentProbe = false,
             IsAutomated = true,
             ForceSave = false
@@ -75,84 +73,57 @@ public sealed class RefreshArtworkTask : IScheduledTask
 
         var includeItemTypes = new[] { BaseItemKind.Movie, BaseItemKind.Series, BaseItemKind.Season };
 
-        // Get a total count (best effort) for progress reporting.
-        int totalCount = 0;
-        try
+        // Snapshot the matching IDs before starting refreshes. Refreshing metadata can change
+        // item/query state, so paging a live query while modifying its rows risks skips/duplicates.
+        var query = new InternalItemsQuery
         {
-            var countQuery = new InternalItemsQuery
-            {
-                IncludeItemTypes = includeItemTypes,
-                Recursive = true,
-                Limit = 1,
-                StartIndex = 0,
-                EnableTotalRecordCount = true
-            };
+            IncludeItemTypes = includeItemTypes,
+            Recursive = true,
+            IsVirtualItem = false
+        };
 
-            var countResult = _libraryManager.GetItemsResult(countQuery);
-            totalCount = countResult?.TotalRecordCount ?? 0;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Failed to determine total item count for artwork refresh task.");
-        }
-
+        var itemIds = _libraryManager.GetItemIds(query);
+        var totalCount = itemIds.Count;
         var processed = 0;
         var refreshed = 0;
         var skipped = 0;
 
-        for (var startIndex = 0; ; startIndex += PageSize)
+        foreach (var itemId in itemIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            processed++;
 
-            var query = new InternalItemsQuery
+            var item = _libraryManager.GetItemById(itemId);
+            if (item == null)
             {
-                IncludeItemTypes = includeItemTypes,
-                Recursive = true,
-                StartIndex = startIndex,
-                Limit = PageSize,
-                IsVirtualItem = false
-            };
-
-            var items = _libraryManager.GetItemList(query).ToList();
-            if (items.Count == 0)
-            {
-                break;
-            }
-
-            foreach (var item in items)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                processed++;
-
-                try
-                {
-                    if (!HasAnyRelevantProviderId(item))
-                    {
-                        skipped++;
-                        ReportProgress(progress, processed, totalCount);
-                        continue;
-                    }
-
-                    _logger.LogInformation("[ArtworkMultiSource] Refreshing images for {Name} ({Id})", item.Name, item.Id);
-                    await item.RefreshMetadata(refreshOptions, cancellationToken).ConfigureAwait(false);
-                    refreshed++;
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "[ArtworkMultiSource] Failed to refresh images for {Name} ({Id})", item.Name, item.Id);
-                }
-
+                skipped++;
                 ReportProgress(progress, processed, totalCount);
+                continue;
             }
 
-            if (items.Count < PageSize)
+            try
             {
-                break;
+                if (!HasAnyRelevantProviderId(item))
+                {
+                    skipped++;
+                    ReportProgress(progress, processed, totalCount);
+                    continue;
+                }
+
+                _logger.LogInformation("[ArtworkMultiSource] Refreshing images for {Name} ({Id})", item.Name, item.Id);
+                await item.RefreshMetadata(refreshOptions, cancellationToken).ConfigureAwait(false);
+                refreshed++;
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[ArtworkMultiSource] Failed to refresh images for {Name} ({Id})", item.Name, item.Id);
+            }
+
+            ReportProgress(progress, processed, totalCount);
         }
 
         _logger.LogInformation("[ArtworkMultiSource] Artwork refresh task completed. Processed={Processed}, Refreshed={Refreshed}, Skipped={Skipped}", processed, refreshed, skipped);
@@ -174,18 +145,25 @@ public sealed class RefreshArtworkTask : IScheduledTask
 
             var seriesTmdb = series.GetProviderId(MetadataProvider.Tmdb);
             var seriesTvdb = series.GetProviderId(MetadataProvider.Tvdb);
+            var seriesImdb = series.GetProviderId(MetadataProvider.Imdb);
             var seasonTmdb = season.GetProviderId(MetadataProvider.Tmdb);
             var seasonTvdb = season.GetProviderId(MetadataProvider.Tvdb);
+            var seasonImdb = season.GetProviderId(MetadataProvider.Imdb);
 
             return !string.IsNullOrWhiteSpace(seriesTmdb)
                    || !string.IsNullOrWhiteSpace(seriesTvdb)
+                   || !string.IsNullOrWhiteSpace(seriesImdb)
                    || !string.IsNullOrWhiteSpace(seasonTmdb)
-                   || !string.IsNullOrWhiteSpace(seasonTvdb);
+                   || !string.IsNullOrWhiteSpace(seasonTvdb)
+                   || !string.IsNullOrWhiteSpace(seasonImdb);
         }
 
         var tmdb = item.GetProviderId(MetadataProvider.Tmdb);
         var tvdb = item.GetProviderId(MetadataProvider.Tvdb);
-        return !string.IsNullOrWhiteSpace(tmdb) || !string.IsNullOrWhiteSpace(tvdb);
+        var imdb = item.GetProviderId(MetadataProvider.Imdb);
+        return !string.IsNullOrWhiteSpace(tmdb)
+               || !string.IsNullOrWhiteSpace(tvdb)
+               || !string.IsNullOrWhiteSpace(imdb);
     }
 
     private static void ReportProgress(IProgress<double> progress, int processed, int total)

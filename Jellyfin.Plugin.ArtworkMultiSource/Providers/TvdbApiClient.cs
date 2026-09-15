@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
 {
-    public class TvdbApiClient
+    public class TvdbApiClient : IDisposable
     {
         private const string BaseUrl = "https://api4.thetvdb.com/v4";
         private static readonly TimeSpan EpisodeCacheDuration = TimeSpan.FromHours(6);
@@ -28,6 +28,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
         private readonly ConcurrentDictionary<int, TvdbSeriesCacheEntry> _seriesCache = new();
         private readonly ConcurrentDictionary<int, TvdbMovieCacheEntry> _movieCache = new();
 
+        private string _subscriberPin = string.Empty;
         private string? _token;
         private DateTimeOffset _tokenExpiry = DateTimeOffset.MinValue;
 
@@ -42,9 +43,22 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             };
         }
 
+        public void UpdateSubscriberPin(string? subscriberPin)
+        {
+            var normalized = subscriberPin?.Trim() ?? string.Empty;
+            if (string.Equals(_subscriberPin, normalized, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _subscriberPin = normalized;
+            _token = null;
+            _tokenExpiry = DateTimeOffset.MinValue;
+        }
+
         public async Task<TvdbEpisode?> FindEpisodeAsync(int seriesId, int seasonNumber, int episodeNumber, CancellationToken cancellationToken)
         {
-            var episodes = await GetEpisodesForSeriesAsync(seriesId, cancellationToken);
+            var episodes = await GetEpisodesForSeriesAsync(seriesId, cancellationToken).ConfigureAwait(false);
             foreach (var episode in episodes)
             {
                 if (episode.SeasonNumber == seasonNumber && episode.Number == episodeNumber)
@@ -72,7 +86,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             while (!string.IsNullOrEmpty(nextUrl) && pageGuard < 20)
             {
                 pageGuard++;
-                var response = await SendAuthorizedAsync(nextUrl, cancellationToken);
+                using var response = await SendAuthorizedAsync(nextUrl, cancellationToken).ConfigureAwait(false);
                 if (response == null)
                 {
                     break;
@@ -84,7 +98,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
                     break;
                 }
 
-                var body = await response.Content.ReadAsStringAsync();
+                var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                 var data = JsonSerializer.Deserialize<TvdbEpisodeListResponse>(body, _jsonOptions);
                 if (data?.Data?.Episodes != null)
                 {
@@ -101,24 +115,27 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             return episodes;
         }
 
-        public Task<HttpResponseMessage> GetImageAsync(string url, CancellationToken cancellationToken)
+        public async Task<HttpResponseMessage> GetImageAsync(string url, CancellationToken cancellationToken)
         {
-            var request = new HttpRequestMessage(HttpMethod.Get, url);
-            return _httpClient.SendAsync(request, cancellationToken);
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            return await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         }
 
         public async Task<TvdbTranslation?> GetEpisodeTranslationAsync(int episodeId, string language, CancellationToken cancellationToken)
         {
             var url = $"{BaseUrl}/episodes/{episodeId}/translations/{language}";
-            var response = await SendAuthorizedAsync(url, cancellationToken);
+            using var response = await SendAuthorizedAsync(url, cancellationToken).ConfigureAwait(false);
             if (response == null || !response.IsSuccessStatusCode)
             {
-                _logger.LogDebug("TVDB translation request failed for episode {EpisodeId} lang {Language} (status: {Status})",
-                    episodeId, language, response?.StatusCode);
+                _logger.LogDebug(
+                    "TVDB translation request failed for episode {EpisodeId} lang {Language} (status: {Status})",
+                    episodeId,
+                    language,
+                    response?.StatusCode);
                 return null;
             }
 
-            var json = await response.Content.ReadAsStringAsync();
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var translation = JsonSerializer.Deserialize<TvdbTranslationResponse>(json, _jsonOptions);
             return translation?.Data;
         }
@@ -126,14 +143,14 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
         public async Task<TvdbEpisode?> GetEpisodeByIdAsync(int episodeId, CancellationToken cancellationToken)
         {
             var url = $"{BaseUrl}/episodes/{episodeId}";
-            var response = await SendAuthorizedAsync(url, cancellationToken);
+            using var response = await SendAuthorizedAsync(url, cancellationToken).ConfigureAwait(false);
             if (response == null || !response.IsSuccessStatusCode)
             {
                 _logger.LogDebug("TVDB episode lookup failed for id {EpisodeId} (status: {Status})", episodeId, response?.StatusCode);
                 return null;
             }
 
-            var json = await response.Content.ReadAsStringAsync();
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var data = JsonSerializer.Deserialize<TvdbEpisodeResponse>(json, _jsonOptions);
             return data?.Data;
         }
@@ -147,14 +164,14 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             }
 
             var url = $"{BaseUrl}/series/{seriesId}/extended";
-            var response = await SendAuthorizedAsync(url, cancellationToken);
+            using var response = await SendAuthorizedAsync(url, cancellationToken).ConfigureAwait(false);
             if (response == null || !response.IsSuccessStatusCode)
             {
                 _logger.LogDebug("TVDB series extended request failed for id {SeriesId} (status: {Status})", seriesId, response?.StatusCode);
                 return null;
             }
 
-            var json = await response.Content.ReadAsStringAsync();
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var data = JsonSerializer.Deserialize<TvdbSeriesExtendedResponse>(json, _jsonOptions);
             if (data?.Data != null)
             {
@@ -164,7 +181,6 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             return data?.Data;
         }
 
-        
         public async Task<TvdbMovieExtended?> GetMovieExtendedAsync(int movieId, CancellationToken cancellationToken)
         {
             if (_movieCache.TryGetValue(movieId, out var cached) &&
@@ -174,14 +190,14 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             }
 
             var url = $"{BaseUrl}/movies/{movieId}/extended";
-            var response = await SendAuthorizedAsync(url, cancellationToken);
+            using var response = await SendAuthorizedAsync(url, cancellationToken).ConfigureAwait(false);
             if (response == null || !response.IsSuccessStatusCode)
             {
                 _logger.LogDebug("TVDB movie extended request failed for id {MovieId} (status: {Status})", movieId, response?.StatusCode);
                 return null;
             }
 
-            var json = await response.Content.ReadAsStringAsync();
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var data = JsonSerializer.Deserialize<TvdbMovieExtendedResponse>(json, _jsonOptions);
             if (data?.Data != null)
             {
@@ -191,36 +207,40 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             return data?.Data;
         }
 
-private async Task<HttpResponseMessage?> SendAuthorizedAsync(string url, CancellationToken cancellationToken)
+        private async Task<HttpResponseMessage?> SendAuthorizedAsync(string url, CancellationToken cancellationToken)
         {
-            var token = await GetTokenAsync(cancellationToken);
+            var token = await GetTokenAsync(cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(token))
             {
                 _logger.LogWarning("TVDB token unavailable; skipping request to {Url}", url);
                 return null;
             }
 
-            var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-
-            var response = await _httpClient.SendAsync(request, cancellationToken);
-            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            var response = await SendWithBearerAsync(url, token, cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode != HttpStatusCode.Unauthorized)
             {
-                _logger.LogInformation("TVDB token expired, refreshing token and retrying {Url}", url);
-                _token = null;
-
-                token = await GetTokenAsync(cancellationToken);
-                if (string.IsNullOrWhiteSpace(token))
-                {
-                    return response;
-                }
-
-                request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                response = await _httpClient.SendAsync(request, cancellationToken);
+                return response;
             }
 
-            return response;
+            _logger.LogInformation("TVDB token expired, refreshing token and retrying {Url}", url);
+            _token = null;
+            _tokenExpiry = DateTimeOffset.MinValue;
+
+            token = await GetTokenAsync(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return response;
+            }
+
+            response.Dispose();
+            return await SendWithBearerAsync(url, token, cancellationToken).ConfigureAwait(false);
+        }
+
+        private async Task<HttpResponseMessage> SendWithBearerAsync(string url, string token, CancellationToken cancellationToken)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            return await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         }
 
         private async Task<string?> GetTokenAsync(CancellationToken cancellationToken)
@@ -236,7 +256,7 @@ private async Task<HttpResponseMessage?> SendAuthorizedAsync(string url, Cancell
                 return null;
             }
 
-            await _tokenLock.WaitAsync(cancellationToken);
+            await _tokenLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 if (!string.IsNullOrWhiteSpace(_token) && _tokenExpiry > DateTimeOffset.UtcNow.AddMinutes(5))
@@ -244,20 +264,29 @@ private async Task<HttpResponseMessage?> SendAuthorizedAsync(string url, Cancell
                     return _token;
                 }
 
-                var payload = JsonSerializer.Serialize(new { apikey = _projectApiKey });
-                var content = new StringContent(payload, Encoding.UTF8, "application/json");
+                var loginPayload = new Dictionary<string, string>
+                {
+                    ["apikey"] = _projectApiKey
+                };
 
-                var response = await _httpClient.PostAsync($"{BaseUrl}/login", content, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(_subscriberPin))
+                {
+                    loginPayload["pin"] = _subscriberPin;
+                }
+
+                var payload = JsonSerializer.Serialize(loginPayload);
+                using var content = new StringContent(payload, Encoding.UTF8, "application/json");
+                using var response = await _httpClient.PostAsync($"{BaseUrl}/login", content, cancellationToken).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                 {
                     _logger.LogWarning("TVDB login failed with status {Status}", response.StatusCode);
                     return null;
                 }
 
-                var json = await response.Content.ReadAsStringAsync();
+                var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                 var login = JsonSerializer.Deserialize<TvdbLoginResponse>(json, _jsonOptions);
                 _token = login?.Data?.Token;
-                _tokenExpiry = DateTimeOffset.UtcNow.AddHours(12);
+                _tokenExpiry = DateTimeOffset.UtcNow.AddDays(28);
 
                 if (string.IsNullOrWhiteSpace(_token))
                 {
@@ -265,10 +294,14 @@ private async Task<HttpResponseMessage?> SendAuthorizedAsync(string url, Cancell
                 }
                 else
                 {
-                    _logger.LogInformation("Obtained TVDB token; expires at {Expiry}", _tokenExpiry.ToString("u"));
+                    _logger.LogDebug("Obtained TVDB token; expires at {Expiry}", _tokenExpiry.ToString("u"));
                 }
 
                 return _token;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -279,6 +312,12 @@ private async Task<HttpResponseMessage?> SendAuthorizedAsync(string url, Cancell
             {
                 _tokenLock.Release();
             }
+        }
+
+        public void Dispose()
+        {
+            _tokenLock.Dispose();
+            GC.SuppressFinalize(this);
         }
 
         private sealed record TvdbEpisodeCacheEntry(DateTimeOffset CachedAt, List<TvdbEpisode> Episodes);

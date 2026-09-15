@@ -27,11 +27,9 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
         private readonly ConcurrentDictionary<string, (DateTimeOffset CachedAt, TmdbSeasonImagesResponse Data)> _seasonImagesCache = new();
         private readonly ConcurrentDictionary<int, (DateTimeOffset CachedAt, int? TvId)> _tvdbFindCache = new();
         private readonly ConcurrentDictionary<string, (DateTimeOffset CachedAt, int? TvId)> _imdbFindTvCache = new(StringComparer.OrdinalIgnoreCase);
-        private readonly ConcurrentDictionary<int, (DateTimeOffset CachedAt, int? MovieId)> _tvdbFindMovieCache = new();
         private readonly ConcurrentDictionary<string, (DateTimeOffset CachedAt, int? MovieId)> _imdbFindMovieCache = new(StringComparer.OrdinalIgnoreCase);
 
         private readonly ConcurrentDictionary<int, (DateTimeOffset CachedAt, int? TvdbId)> _tvExternalIdsCache = new();
-        private readonly ConcurrentDictionary<int, (DateTimeOffset CachedAt, int? TvdbId)> _movieExternalIdsCache = new();
 
         public TmdbApiClient(HttpClient httpClient, ILogger logger, string apiKey)
         {
@@ -41,7 +39,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
 
             // TMDb supports either a v3 API key (query param) or a v4 Read Access Token (Bearer).
             // Heuristic: v4 tokens are long JWT-like strings that typically start with "eyJ".
-            _useBearerToken = _apiKey.Length > 60 && (_apiKey.StartsWith("eyJ", StringComparison.Ordinal) || _apiKey.Contains('.', StringComparison.Ordinal));
+            _useBearerToken = _apiKey.Length > 60 && (_apiKey.StartsWith("eyJ", StringComparison.Ordinal) || _apiKey.Contains(".", StringComparison.Ordinal));
             _jsonOptions = new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
@@ -100,7 +98,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             }
         }
 
-        
+
         public async Task<TmdbMovieImagesResponse?> GetMovieImagesAsync(int movieId, string includeImageLanguages, CancellationToken cancellationToken)
         {
             if (!IsConfigured || movieId <= 0)
@@ -140,7 +138,7 @@ namespace Jellyfin.Plugin.ArtworkMultiSource.Providers
             }
         }
 
-public async Task<TmdbSeasonImagesResponse?> GetSeasonImagesAsync(int tvId, int seasonNumber, string includeImageLanguages, CancellationToken cancellationToken)
+        public async Task<TmdbSeasonImagesResponse?> GetSeasonImagesAsync(int tvId, int seasonNumber, string includeImageLanguages, CancellationToken cancellationToken)
         {
             if (!IsConfigured || tvId <= 0)
             {
@@ -291,81 +289,6 @@ public async Task<TmdbSeasonImagesResponse?> GetSeasonImagesAsync(int tvId, int 
             }
         }
 
-        public async Task<int?> GetTvdbIdForMovieAsync(int movieId, CancellationToken cancellationToken)
-        {
-            if (!IsConfigured || movieId <= 0)
-            {
-                return null;
-            }
-
-            if (_movieExternalIdsCache.TryGetValue(movieId, out var cached) && DateTimeOffset.UtcNow - cached.CachedAt < CacheDuration)
-            {
-                return cached.TvdbId;
-            }
-
-            var url = BuildUrl($"/movie/{movieId}/external_ids", "");
-            using var response = await SendAsync(url, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogDebug("TMDb movie external_ids failed for id {MovieId} (status: {Status})", movieId, response.StatusCode);
-                _movieExternalIdsCache[movieId] = (DateTimeOffset.UtcNow, null);
-                return null;
-            }
-
-            try
-            {
-                var json = await response.Content.ReadAsStringAsync(cancellationToken);
-                var data = JsonSerializer.Deserialize<TmdbMovieExternalIds>(json, _jsonOptions);
-                var tvdb = data?.TvdbId;
-                _movieExternalIdsCache[movieId] = (DateTimeOffset.UtcNow, tvdb);
-                return tvdb;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to parse TMDb movie external_ids response for id {MovieId}", movieId);
-                _movieExternalIdsCache[movieId] = (DateTimeOffset.UtcNow, null);
-                return null;
-            }
-        }
-
-
-        public async Task<int?> FindMovieIdByTvdbAsync(int tvdbId, CancellationToken cancellationToken)
-        {
-            if (!IsConfigured || tvdbId <= 0)
-            {
-                return null;
-            }
-
-            if (_tvdbFindMovieCache.TryGetValue(tvdbId, out var cached) && DateTimeOffset.UtcNow - cached.CachedAt < CacheDuration)
-            {
-                return cached.MovieId;
-            }
-
-            var url = BuildFindUrl(tvdbId.ToString(), "tvdb_id");
-            using var response = await SendAsync(url, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogDebug("TMDb find(tvdb_id) failed for TVDB {TvdbId} (status: {Status})", tvdbId, response.StatusCode);
-                _tvdbFindMovieCache[tvdbId] = (DateTimeOffset.UtcNow, null);
-                return null;
-            }
-
-            try
-            {
-                var json = await response.Content.ReadAsStringAsync(cancellationToken);
-                var data = JsonSerializer.Deserialize<TmdbFindResponse>(json, _jsonOptions);
-                var tmdbId = data?.MovieResults?.FirstOrDefault()?.Id;
-                _tvdbFindMovieCache[tvdbId] = (DateTimeOffset.UtcNow, tmdbId);
-                return tmdbId;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to parse TMDb find response for TVDB {TvdbId}", tvdbId);
-                _tvdbFindMovieCache[tvdbId] = (DateTimeOffset.UtcNow, null);
-                return null;
-            }
-        }
-
         public async Task<int?> FindMovieIdByImdbAsync(string imdbId, CancellationToken cancellationToken)
         {
             if (!IsConfigured || string.IsNullOrWhiteSpace(imdbId))
@@ -403,7 +326,6 @@ public async Task<TmdbSeasonImagesResponse?> GetSeasonImagesAsync(int tvId, int 
                 return null;
             }
         }
-
 
         private string BuildUrl(string path, string includeImageLanguages)
         {
